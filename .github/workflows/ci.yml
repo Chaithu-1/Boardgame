@@ -1,113 +1,187 @@
-name: CI
+name: Complete DevSecOps CI-CD Pipeline
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-permissions:
-  contents: write
-  pull-requests: write
+    branches:
+      - main
 
 env:
-  MAVEN_OPTS: -Dmaven.repo.local=.m2/repository
-  IMAGE_TAG: ${{ github.sha }}
-  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}
+  IMAGE_NAME: yourdockerhubusername/java-app
 
 jobs:
-  build:
+
+  devsecops-pipeline:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-          cache: maven
+    #################################################
+    # Checkout Code
+    #################################################
 
-      - name: Cache Maven repository
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-m2-
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
 
-      - name: Build with Maven
-        run: mvn --batch-mode clean verify
+    #################################################
+    # Setup Java & Maven
+    #################################################
 
-      #- name: Run SonarQube analysis
-       # run: mvn sonar:sonar -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
+    - name: Setup JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
 
-      - name: Install Checkov
-        run: python -m pip install --upgrade pip checkov
+    - name: Cache Maven Packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-m2
 
-      - name: Scan for hardcoded issues with Checkov
-        run: checkov -d .
+    #################################################
+    # Maven Build
+    #################################################
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+    - name: Build Application
+      run: mvn clean package -DskipTests
 
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          tags: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
+    #################################################
+    # SonarQube Scan
+    #################################################
 
-      - name: Scan Docker image with Trivy
-        uses: aquasecurity/trivy-action@v1
-        with:
-          image-ref: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
-          format: table
-          exit-code: '1'
+    - name: SonarQube Analysis
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        mvn sonar:sonar \
+        -Dsonar.projectKey=java-app \
+        -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+        -Dsonar.login=${{ secrets.SONAR_TOKEN }}
 
-      - name: Push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
+    #################################################
+    # Install Trivy
+    #################################################
 
-      - name: Install YAML support for Helm tag updates
-        run: python -m pip install pyyaml
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
 
-      - name: Update Helm chart image tags
-        run: |
-          python - <<'PY'
-          import os
-          import pathlib
-          import yaml
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
+        gpg --dearmor | \
+        sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
 
-          tag = os.environ['IMAGE_TAG']
-          for path in pathlib.Path('.').rglob('values.yaml'):
-              data = yaml.safe_load(path.read_text())
-              if isinstance(data, dict):
-                  image = data.get('image')
-                  if isinstance(image, dict):
-                      image['tag'] = tag
-                      path.write_text(yaml.safe_dump(data, sort_keys=False))
-          PY
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
+        sudo tee /etc/apt/sources.list.d/trivy.list
 
-      - name: Commit Helm values updates
-        env:
-          IMAGE_TAG: ${{ env.IMAGE_TAG }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add **/values.yaml
-          if ! git diff --cached --quiet; then
-            git commit -m "ci: update Helm chart image tag to $IMAGE_TAG"
-            git push origin HEAD:${{ github.ref_name }}
-          else
-            echo "No Helm values changes detected."
-          fi
+        sudo apt-get update
+        sudo apt-get install trivy -y
+
+    #################################################
+    # Trivy Filesystem Scan
+    #################################################
+
+    - name: Trivy Filesystem Scan
+      run: |
+        trivy fs . \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 0
+
+    #################################################
+    # Install Checkov
+    #################################################
+
+    - name: Install Checkov
+      run: |
+        pip install checkov
+
+    #################################################
+    # Checkov Scan
+    #################################################
+
+    - name: Checkov IaC Scan
+      run: |
+        checkov -d . \
+        --framework kubernetes,dockerfile,github_actions,helm \
+        --soft-fail
+
+    #################################################
+    # DockerHub Login
+    #################################################
+
+    - name: DockerHub Login
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    #################################################
+    # Generate Commit SHA Tag
+    #################################################
+
+    - name: Generate Image Tag
+      run: |
+        echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    #################################################
+    # Docker Build
+    #################################################
+
+    - name: Build Docker Image
+      run: |
+        docker build -t $IMAGE_NAME:$IMAGE_TAG .
+        docker tag $IMAGE_NAME:$IMAGE_TAG $IMAGE_NAME:latest
+
+    #################################################
+    # Trivy Docker Image Scan
+    #################################################
+
+    - name: Trivy Image Scan
+      run: |
+        trivy image $IMAGE_NAME:$IMAGE_TAG \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 0
+
+    #################################################
+    # Push Docker Images
+    #################################################
+
+    - name: Push Docker Images
+      run: |
+        docker push $IMAGE_NAME:$IMAGE_TAG
+        docker push $IMAGE_NAME:latest
+
+    #################################################
+    # Update Helm values.yaml
+    #################################################
+
+    - name: Update Helm Image Tag
+      run: |
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values.yaml
+
+    #################################################
+    # Commit Updated Helm values.yaml
+    #################################################
+
+    - name: Commit Helm Changes
+      run: |
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "github-actions"
+
+        git add helm-chart/values.yaml
+
+        git commit -m "Updated image tag to $IMAGE_TAG" || echo "No changes to commit"
+
+    #################################################
+    # Push Helm Changes
+    #################################################
+
+    - name: Push Helm Changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
