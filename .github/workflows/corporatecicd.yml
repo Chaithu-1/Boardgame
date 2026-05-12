@@ -1,0 +1,229 @@
+name: DevSecOps GitOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: java-app
+
+jobs:
+
+  devsecops-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    #################################################
+    # Checkout Source Code
+    #################################################
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    #################################################
+    # Setup Java & Maven
+    #################################################
+
+    - name: Setup JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    #################################################
+    # Cache Maven Dependencies
+    #################################################
+
+    - name: Cache Maven Packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-m2
+
+    #################################################
+    # Maven Build
+    #################################################
+
+    - name: Maven Build
+      run: |
+        mvn clean package -DskipTests
+
+    #################################################
+    # SonarQube Scan
+    #################################################
+
+    - name: SonarQube Analysis
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        mvn sonar:sonar \
+        -Dsonar.projectKey=java-app \
+        -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+        -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    #################################################
+    # Install Trivy
+    #################################################
+
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
+        gpg --dearmor | \
+        sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
+        sudo tee /etc/apt/sources.list.d/trivy.list
+
+        sudo apt-get update
+        sudo apt-get install trivy -y
+
+    #################################################
+    # Trivy Filesystem Scan
+    #################################################
+
+    - name: Trivy Filesystem Scan
+      run: |
+        trivy fs . \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 0
+
+    #################################################
+    # Install Checkov
+    #################################################
+
+    - name: Install Checkov
+      run: |
+        pip install checkov
+
+    #################################################
+    # Checkov IaC Scan
+    #################################################
+
+    - name: Checkov Scan
+      run: |
+        checkov -d . \
+        --framework kubernetes,dockerfile,github_actions,helm \
+        --soft-fail
+
+    #################################################
+    # Generate Commit SHA Tag
+    #################################################
+
+    - name: Generate Image Tag
+      run: |
+        echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    #################################################
+    # Docker Build
+    #################################################
+
+    - name: Build Docker Image
+      run: |
+        docker build -t $IMAGE_NAME:$IMAGE_TAG .
+
+    #################################################
+    # Trivy Image Scan
+    #################################################
+
+    - name: Trivy Docker Image Scan
+      run: |
+        trivy image $IMAGE_NAME:$IMAGE_TAG \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 0
+
+    #################################################
+    # Update Helm values.yaml
+    #################################################
+
+    - name: Update Helm Image Tag
+      run: |
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-dev.yaml
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-qa.yaml
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-stage.yaml
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-prod.yaml
+
+    #################################################
+    # Commit Helm Changes
+    #################################################
+
+    - name: Commit Helm Changes
+      run: |
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "github-actions"
+
+        git add helm-chart/
+
+        git commit -m "Updated image tag to $IMAGE_TAG" || echo "No Changes"
+
+    #################################################
+    # Push Helm Changes
+    #################################################
+
+    - name: Push Helm Changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
+
+    #################################################
+    # Install kubectl
+    #################################################
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: latest
+
+    #################################################
+    # Configure Kubernetes Access
+    #################################################
+
+    - name: Configure kubeconfig
+      run: |
+        mkdir -p ~/.kube
+
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+
+        chmod 600 ~/.kube/config
+
+    #################################################
+    # Verify Kubernetes Connection
+    #################################################
+
+    - name: Verify Kubernetes Connection
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    #################################################
+    # Apply ArgoCD Applications
+    #################################################
+
+    - name: Apply ArgoCD Applications
+      run: |
+        kubectl apply -f argocd/ --server-side
+
+    #################################################
+    # Verify ArgoCD Applications
+    #################################################
+
+    - name: Verify ArgoCD Applications
+      run: |
+        kubectl get applications -n argocd
+
+    #################################################
+    # Verify ArgoCD Sync Status
+    #################################################
+
+    - name: Verify Sync Status
+      run: |
+        kubectl get applications -n argocd -o wide
