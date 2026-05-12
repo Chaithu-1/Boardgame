@@ -1,50 +1,113 @@
-name: CI Pipeline
+name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  MAVEN_OPTS: -Dmaven.repo.local=.m2/repository
+  IMAGE_TAG: ${{ github.sha }}
+  DOCKER_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPOSITORY }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
-    - name: Set up JDK 11
-      uses: actions/setup-java@v4
-      with:
-        java-version: '11'
-        distribution: 'temurin'
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
 
-    - name: Build with Maven
-      run: mvn clean package
+      - name: Cache Maven repository
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
 
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Build with Maven
+        run: mvn --batch-mode clean verify
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        load: true
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/boardgame:${{ github.sha }}
+      #- name: Run SonarQube analysis
+       # run: mvn sonar:sonar -Dsonar.login=${{ secrets.SONAR_TOKEN }} -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
 
-    - name: Run container and verify app
-      run: |
-        docker run -d --name boardgame-test -p 8080:8080 ${{ secrets.DOCKERHUB_USERNAME }}/boardgame:${{ github.sha }}
-        sleep 15
-        curl --retry 10 --retry-connrefused --retry-delay 3 http://localhost:8080/ | head -n 20
-      shell: bash
+      - name: Install Checkov
+        run: python -m pip install --upgrade pip checkov
 
-    - name: Stop and remove container
-      run: |
-        docker stop boardgame-test || true
-        docker rm boardgame-test || true
-      shell: bash
+      - name: Scan for hardcoded issues with Checkov
+        run: checkov -d .
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@v1
+        with:
+          image-ref: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+
+      - name: Push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.IMAGE_TAG }}
+
+      - name: Install YAML support for Helm tag updates
+        run: python -m pip install pyyaml
+
+      - name: Update Helm chart image tags
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import yaml
+
+          tag = os.environ['IMAGE_TAG']
+          for path in pathlib.Path('.').rglob('values.yaml'):
+              data = yaml.safe_load(path.read_text())
+              if isinstance(data, dict):
+                  image = data.get('image')
+                  if isinstance(image, dict):
+                      image['tag'] = tag
+                      path.write_text(yaml.safe_dump(data, sort_keys=False))
+          PY
+
+      - name: Commit Helm values updates
+        env:
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add **/values.yaml
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: update Helm chart image tag to $IMAGE_TAG"
+            git push origin HEAD:${{ github.ref_name }}
+          else
+            echo "No Helm values changes detected."
+          fi
