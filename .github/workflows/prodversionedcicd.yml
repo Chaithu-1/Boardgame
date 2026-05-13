@@ -1,0 +1,304 @@
+name: Production DevSecOps GitOps Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: java-app
+  ENV: prod
+
+jobs:
+
+  prod-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    #################################################
+    # Checkout Source Code
+    #################################################
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    #################################################
+    # Setup Java 17
+    #################################################
+
+    - name: Setup JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    #################################################
+    # Cache Maven Dependencies
+    #################################################
+
+    - name: Cache Maven Packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-m2
+
+    #################################################
+    # Maven Build
+    #################################################
+
+    - name: Maven Build
+      run: |
+        mvn clean package -DskipTests
+
+    #################################################
+    # Run Unit Tests
+    #################################################
+
+    - name: Run Unit Tests
+      run: |
+        mvn test
+
+    #################################################
+    # SonarQube Scan
+    #################################################
+
+    - name: SonarQube Analysis
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        mvn sonar:sonar \
+        -Dsonar.projectKey=java-app-prod \
+        -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+        -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    #################################################
+    # Sonar Quality Gate Check
+    #################################################
+
+    - name: SonarQube Quality Gate
+      uses: sonarsource/sonarqube-quality-gate-action@master
+      timeout-minutes: 5
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+    #################################################
+    # Install Trivy
+    #################################################
+
+    - name: Install Trivy
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
+        gpg --dearmor | \
+        sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
+        sudo tee /etc/apt/sources.list.d/trivy.list
+
+        sudo apt-get update
+        sudo apt-get install trivy -y
+
+    #################################################
+    # Trivy Filesystem Scan
+    #################################################
+
+    - name: Trivy Filesystem Scan
+      run: |
+        trivy fs . \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 1
+
+    #################################################
+    # Trivy Secret Scan
+    #################################################
+
+    - name: Trivy Secret Scan
+      run: |
+        trivy fs . \
+        --scanners secret \
+        --severity HIGH,CRITICAL \
+        --exit-code 1
+
+    #################################################
+    # Install Checkov
+    #################################################
+
+    - name: Install Checkov
+      run: |
+        pip install checkov
+
+    #################################################
+    # Checkov IaC Scan
+    #################################################
+
+    - name: Checkov Scan
+      run: |
+        checkov -d . \
+        --framework kubernetes,dockerfile,github_actions,helm \
+        --soft-fail false
+
+    #################################################
+    # Generate Image Tag
+    #################################################
+
+    - name: Generate Image Tag
+      run: |
+        echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    #################################################
+    # Docker Build
+    #################################################
+
+    - name: Docker Build
+      run: |
+        docker build -t $IMAGE_NAME:$IMAGE_TAG .
+
+    #################################################
+    # Trivy Docker Image Scan
+    #################################################
+
+    - name: Trivy Image Scan
+      run: |
+        trivy image $IMAGE_NAME:$IMAGE_TAG \
+        --severity HIGH,CRITICAL \
+        --format table \
+        --exit-code 1
+
+    #################################################
+    # Dockerfile Best Practices Scan
+    #################################################
+
+    - name: Dockerfile Lint
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: Dockerfile
+
+    #################################################
+    # Helm Lint
+    #################################################
+
+    - name: Helm Lint
+      run: |
+        helm lint helm-chart/
+
+    #################################################
+    # Kubernetes Manifest Validation
+    #################################################
+
+    - name: Validate Kubernetes Manifests
+      run: |
+        helm template java-app helm-chart \
+        -f helm-chart/values-prod.yaml > rendered.yaml
+
+    #################################################
+    # Update Production Helm Values
+    #################################################
+
+    - name: Update Production Image Tag
+      run: |
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-prod.yaml
+
+    #################################################
+    # Git Config
+    #################################################
+
+    - name: Configure Git
+      run: |
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "github-actions"
+
+    #################################################
+    # Commit Helm Changes
+    #################################################
+
+    - name: Commit Helm Changes
+      run: |
+        git add helm-chart/values-prod.yaml
+
+        git commit -m "Updated prod image tag to $IMAGE_TAG" || echo "No Changes"
+
+    #################################################
+    # Push Helm Changes
+    #################################################
+
+    - name: Push Helm Changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: main
+
+    #################################################
+    # Install kubectl
+    #################################################
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: latest
+
+    #################################################
+    # Configure Kubernetes Access
+    #################################################
+
+    - name: Configure kubeconfig
+      run: |
+        mkdir -p ~/.kube
+
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+
+        chmod 600 ~/.kube/config
+
+    #################################################
+    # Verify Kubernetes Connection
+    #################################################
+
+    - name: Verify Cluster Access
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    #################################################
+    # Verify ArgoCD Namespace
+    #################################################
+
+    - name: Verify ArgoCD Namespace
+      run: |
+        kubectl get ns argocd
+
+    #################################################
+    # Apply Production ArgoCD Application
+    #################################################
+
+    - name: Deploy Production Application
+      run: |
+        kubectl apply -f argocd/prod-application.yaml --server-side
+
+    #################################################
+    # Verify ArgoCD Application
+    #################################################
+
+    - name: Verify ArgoCD Application
+      run: |
+        kubectl get applications -n argocd
+
+    #################################################
+    # Verify ArgoCD Sync Status
+    #################################################
+
+    - name: Verify Sync Status
+      run: |
+        kubectl get applications -n argocd -o wide
+
+    #################################################
+    # Deployment Success Message
+    #################################################
+
+    - name: Deployment Status
+      run: |
+        echo "Production Deployment Completed Successfully"
