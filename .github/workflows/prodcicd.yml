@@ -31,6 +31,7 @@ jobs:
 
     - name: Generate Image Tag
       run: |
+        # it gives you unique image tag for every build
         echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
     - name: Docker Build
