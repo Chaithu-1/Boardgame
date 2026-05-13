@@ -1,0 +1,78 @@
+name: Dev Pipeline
+
+on:
+  push:
+    branches:
+      - dev
+
+env:
+  IMAGE_NAME: java-app
+  ENV: dev
+
+jobs:
+
+  dev-deployment:
+    runs-on: ubuntu-latest
+
+    steps:
+
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Maven Build
+      run: |
+        mvn clean package -DskipTests
+
+    - name: SonarQube Scan
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        mvn sonar:sonar \
+        -Dsonar.projectKey=java-app-dev \
+        -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+        -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+    - name: Generate Image Tag
+      run: |
+        echo "IMAGE_TAG=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: Docker Build
+      run: |
+        docker build -t $IMAGE_NAME:$IMAGE_TAG .
+
+    - name: Update Dev Helm Values
+      run: |
+        sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm-chart/values-dev.yaml
+
+    - name: Commit Helm Changes
+      run: |
+        git config --global user.email "github-actions@github.com"
+        git config --global user.name "github-actions"
+
+        git add helm-chart/values-dev.yaml
+
+        git commit -m "Updated Dev image tag to $IMAGE_TAG" || echo "No Changes"
+
+    - name: Push Helm Changes
+      uses: ad-m/github-push-action@master
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        branch: dev
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v4
+
+    - name: Configure kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+
+    - name: Deploy Dev Application
+      run: |
+        kubectl apply -f argocd/dev-application.yaml --server-side
