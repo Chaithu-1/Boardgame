@@ -113,7 +113,7 @@ jobs:
 
     - name: Install Trivy
       run: |
-        sudo apt-get update
+        sudo apt-get update -y
         sudo apt-get install wget apt-transport-https gnupg lsb-release -y
 
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
@@ -123,7 +123,7 @@ jobs:
         echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
         sudo tee /etc/apt/sources.list.d/trivy.list
 
-        sudo apt-get update
+        sudo apt-get update -y
         sudo apt-get install trivy -y
 
     #################################################
@@ -154,7 +154,7 @@ jobs:
 
     - name: Install Checkov
       run: |
-        pip install checkov
+        pip install checkov -y
 
     #################################################
     # Checkov IaC Scan
