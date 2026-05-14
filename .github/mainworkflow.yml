@@ -282,7 +282,7 @@ jobs:
     - name: Push Helm Changes
       uses: ad-m/github-push-action@master
       with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
+        github_token: ${{ secrets.GITHUBclassic_TOKEN }}
         branch: ${{ github.ref_name }}
 
     #################################################
