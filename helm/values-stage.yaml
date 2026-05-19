@@ -29,21 +29,21 @@ ingress:
   className: ""
   annotations: {}
   hosts:
-    - host: chart-example.local
+    - host: stage.chart-example.local
       paths:
         - path: /
           pathType: ImplementationSpecific
   tls:
-    - secretName: boardgame-prod-tls
+    - secretName: boardgame-stage-tls
       hosts:
-        - chart-example.local
+        - stage.chart-example.local
 
 resources:
   limits:
-    cpu: 500m
+    cpu: 400m
     memory: 512Mi
   requests:
-    cpu: 250m
+    cpu: 200m
     memory: 256Mi
 
 autoscaling:
@@ -52,7 +52,7 @@ autoscaling:
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
 
-env: [ "prod" ]
+env: [ "stage" ]
 
 application:
   properties:

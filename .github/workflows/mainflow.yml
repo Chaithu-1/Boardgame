@@ -110,33 +110,33 @@ jobs:
     #################################################
     # Install Trivy
     #################################################
-
-    - name: Install Trivy
-      run: |
+      - name: Helm Lint
+        run: |
+          helm lint helm/
         sudo apt-get update -y
         sudo apt-get install wget apt-transport-https gnupg lsb-release -y
 
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | \
-        gpg --dearmor | \
-        sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-
-        echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | \
+      - name: Kubernetes Manifest Validation
+        run: |
+          helm template java-app helm \
+          -f helm/values-${ENV}.yaml > rendered.yaml
         sudo tee /etc/apt/sources.list.d/trivy.list
 
         sudo apt-get update -y
         sudo apt-get install trivy -y
-
-    #################################################
-    # Trivy Filesystem Scan
+      - name: Update Helm Image Tag
+        run: |
+          sed -i "s/tag:.*/tag: \"$IMAGE_TAG\"/g" helm/values-${ENV}.yaml
     #################################################
 
     - name: Trivy Filesystem Scan
       run: |
-        trivy fs . \
-        --severity HIGH,CRITICAL \
-        --format table \
-        --exit-code 0
+      - name: Commit Helm Changes
+        run: |
+          git add helm/
 
+          git commit -m "Updated ${ENV} image tag to $IMAGE_TAG" || echo "No Changes"
     #################################################
     # Trivy Secret Scan
     #################################################

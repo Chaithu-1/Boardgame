@@ -29,30 +29,30 @@ ingress:
   className: ""
   annotations: {}
   hosts:
-    - host: chart-example.local
+    - host: qa.chart-example.local
       paths:
         - path: /
           pathType: ImplementationSpecific
   tls:
-    - secretName: boardgame-prod-tls
+    - secretName: boardgame-qa-tls
       hosts:
-        - chart-example.local
+        - qa.chart-example.local
 
 resources:
   limits:
-    cpu: 500m
-    memory: 512Mi
+    cpu: 300m
+    memory: 384Mi
   requests:
-    cpu: 250m
-    memory: 256Mi
+    cpu: 150m
+    memory: 192Mi
 
 autoscaling:
   enabled: false
   minReplicas: 1
-  maxReplicas: 3
+  maxReplicas: 2
   targetCPUUtilizationPercentage: 80
 
-env: [ "prod" ]
+env: [ "qa" ]
 
 application:
   properties:
