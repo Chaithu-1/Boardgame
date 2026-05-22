@@ -18,7 +18,7 @@ spec:
         - values-prod.yaml
 
   destination:
-    server: https://dev-cluster-api-server
+    server: https://prod-cluster-api-server
     namespace: prod
 
   syncPolicy:
