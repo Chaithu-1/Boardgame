@@ -1,5 +1,10 @@
+{{- if .Values.deployment.useRollout }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+{{- else }}
 apiVersion: apps/v1
 kind: Deployment
+{{- end }}
 metadata:
   name: {{ include "boardgame.fullname" . }}
   labels:
@@ -11,6 +16,37 @@ spec:
   selector:
     matchLabels:
       {{- include "boardgame.selectorLabels" . | nindent 6 }}
+  {{- if .Values.deployment.useRollout }}
+  strategy:
+    {{- if eq .Values.deployment.strategy "blueGreen" }}
+    blueGreen:
+      activeService: {{ default (include "boardgame.fullname" .) .Values.deployment.blueGreen.activeService }}
+      previewService: {{ default (printf "%s-preview" (include "boardgame.fullname" .)) .Values.deployment.blueGreen.previewService }}
+      autoPromotionEnabled: {{ .Values.deployment.blueGreen.autoPromotionEnabled | default false }}
+      {{- if .Values.deployment.blueGreen.previewDelaySeconds }}
+      previewDelaySeconds: {{ .Values.deployment.blueGreen.previewDelaySeconds }}
+      {{- end }}
+    {{- else if eq .Values.deployment.strategy "canary" }}
+    canary:
+      maxSurge: {{ default "25%" .Values.deployment.canary.maxSurge }}
+      maxUnavailable: {{ default "0" .Values.deployment.canary.maxUnavailable }}
+      steps:
+      {{- range .Values.deployment.canary.steps }}
+      - {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- else }}
+    blueGreen:
+      activeService: {{ default (include "boardgame.fullname" .) .Values.deployment.blueGreen.activeService }}
+      previewService: {{ default (printf "%s-preview" (include "boardgame.fullname" .)) .Values.deployment.blueGreen.previewService }}
+      autoPromotionEnabled: false
+    {{- end }}
+  {{- else }}
+  strategy:
+    type: {{ default "RollingUpdate" .Values.deployment.strategy }}
+    rollingUpdate:
+      maxSurge: {{ default "25%" .Values.deployment.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ default "25%" .Values.deployment.rollingUpdate.maxUnavailable }}
+  {{- end }}
   template:
     metadata:
       {{- with .Values.podAnnotations }}
